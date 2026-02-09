@@ -1,0 +1,164 @@
+name: Start building the kernel
+permissions:
+  contents: write
+  actions: write
+
+on:
+  push:
+    branches: [ "main" ]
+  pull_request:
+    branches: [ "main" ]
+  
+jobs:
+  build-kernel-sultan-kernelsu-susfs:
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+      DEFCONFIG_PATH: ''
+      KERNEL_ROOT: ''
+      KSU_VERSION: ''
+      KERNEL_VER: ''
+      ARTIFACT: ''
+      PATH_TO_PATCH: ''
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v6
+
+      - name: Подготовка
+        run: |
+          wget https://www.kernel.org/pub/tools/crosstool/files/bin/x86_64/14.2.0/x86_64-gcc-14.2.0-nolibc-aarch64-linux.tar.gz
+          gunzip x86_64-gcc-14.2.0-nolibc-aarch64-linux.tar.gz
+          tar -xf x86_64-gcc-14.2.0-nolibc-aarch64-linux.tar
+
+          KERNEL_ROOT=$GITHUB_WORKSPACE/android_kernel_google_tensynos
+          DEFCONFIG_PATH=$GITHUB_WORKSPACE/android_kernel_google_tensynos/arch/arm64/configs/zuma_defconfig
+          echo "KERNEL_ROOT=$KERNEL_ROOT" >> $GITHUB_ENV
+          echo "DEFCONFIG_PATH=$DEFCONFIG_PATH" >> $GITHUB_ENV
+
+          git clone https://github.com/TheWildJames/AnyKernel3.git -b "sultan-zuma"
+          git clone https://gitlab.com/simonpunk/susfs4ksu.git -b "gki-android14-6.1"
+          git clone https://github.com/TheWildJames/kernel_patches.git
+          git clone https://github.com/kerneltoast/android_kernel_google_tensynos --depth=1
+
+          cat >> "$DEFCONFIG_PATH" << 'EOF'
+          CONFIG_KSU=y
+          CONFIG_KSU_SUSFS=y
+          CONFIG_THREAD_INFO_IN_TASK=y
+          CONFIG_KALLSYMS=y
+          CONFIG_KALLSYMS_ALL=y
+          CONFIG_TMPFS_XATTR=y
+          CONFIG_TMPFS_POSIX_ACL=y
+          EOF
+          sed -i 's/check_defconfig//' ${KERNEL_ROOT}/build.config.gki
+
+          cd ${KERNEL_ROOT}
+          sed -i "s/printf '%s' -dirty/printf '%s'/" scripts/setlocalversion
+          sed -i 's/android_release=/android_release="android14-6.1"/' scripts/setlocalversion
+          sed -i 's/# CONFIG_LOCALVERSION_AUTO is not set/CONFIG_LOCALVERSION_AUTO=y/' ${DEFCONFIG_PATH}
+          sed -i '/CONFIG_LOCALVERSION="-Sultan"/d' ${DEFCONFIG_PATH}
+
+          echo "KERNEL_VER=$(sed -n '2,4p' Makefile | grep -oE '[0-9]+' | paste -sd '.')" >> $GITHUB_ENV
+
+      - name: Интеграция KernelSU Next
+        working-directory: ${{ env.KERNEL_ROOT }}
+        run: |
+          curl -LSs "https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/next/kernel/setup.sh" | bash -s dev
+          cd "KernelSU-Next/kernel"
+          BASE_VERSION=30000 && COMMIT_COUNT=$(/usr/bin/git rev-list --count origin/dev) && KSU_VERSION=$(expr $COMMIT_COUNT "+" $BASE_VERSION)
+          echo "KSU_VERSION=$KSU_VERSION" >> $GITHUB_ENV
+
+      - name: Интеграция SUSFS
+        working-directory: ${{ env.KERNEL_ROOT }}
+        run: |                   
+          cp $GITHUB_WORKSPACE/susfs4ksu/kernel_patches/fs/* ./fs/
+          cp $GITHUB_WORKSPACE/susfs4ksu/kernel_patches/include/linux/* ./include/linux/
+
+          echo "  ➡️ Применение 10_enable_susfs_for_ksu.patch"
+          cd KernelSU-Next
+          patch -p1 < $GITHUB_WORKSPACE/susfs4ksu/kernel_patches/KernelSU/10_enable_susfs_for_ksu.patch || true
+          echo "  🛠️ Исправление ошибок 10_enable_susfs_for_ksu.patch"
+          PATH_TO_PATCH=$GITHUB_WORKSPACE/patches
+          echo "PATH_TO_PATCH=${PATH_TO_PATCH}" >> $GITHUB_ENV
+          echo "      ---> Makefile"
+          patch -p1 < ${PATH_TO_PATCH}/ksu-next_susfs/Makefile.patch
+          echo "      ---> allowlist.c"
+          patch -p1 < ${PATH_TO_PATCH}/ksu-next_susfs/allowlist.c.patch
+          echo "      ---> kernel_umount.c"
+          patch -p1 < ${PATH_TO_PATCH}/ksu-next_susfs/kernel_umount.c.patch
+          echo "      ---> ksu.c"
+          patch -p1 < ${PATH_TO_PATCH}/ksu-next_susfs/ksu.c.patch
+          echo "      ---> ksud.c"
+          patch -p1 < ${PATH_TO_PATCH}/ksu-next_susfs/ksud.c.patch
+          echo "      ---> sucompat.c"
+          patch -p1 < ${PATH_TO_PATCH}/ksu-next_susfs/sucompat.c.patch
+          echo "      ---> supercalls.c"
+          patch -p1 < ${PATH_TO_PATCH}/ksu-next_susfs/supercalls.c.patch
+          cd -
+
+          echo "  ➡️ Применение 50_add_susfs_in_gki-android14-6.1.patch"
+          patch -p1 < $GITHUB_WORKSPACE/susfs4ksu/kernel_patches/50_add_susfs_in_gki-android14-6.1.patch || true
+          echo "  🛠️ Исправление ошибок 50_add_susfs_in_gki-android14-6.1.patch"
+          patch -p1 < $GITHUB_WORKSPACE/kernel_patches/sultan/sys.c_fix.patch
+          patch -p1 < $GITHUB_WORKSPACE/kernel_patches/wild/susfs_fix_patches/v2.0.0/a14-6.1/base.c.patch
+
+      - name: Интеграция Baseband-guard
+        working-directory: ${{ env.KERNEL_ROOT }}
+        run: |
+          wget -O- https://github.com/vc-teahouse/Baseband-guard/raw/main/setup.sh | bash
+          echo "CONFIG_BBG=y" >> ${{ env.DEFCONFIG_PATH }}
+          sed -i '/^config LSM$/,/^help$/{ /^[[:space:]]*default/ { /baseband_guard/! s/selinux/selinux,baseband_guard/ } }' security/Kconfig
+
+      - name: Сборка
+        working-directory: ${{ env.KERNEL_ROOT }}
+        run: |
+          echo "# CONFIG_WERROR is not set" >> "${{ env.DEFCONFIG_PATH }}"
+          make CROSS_COMPILE=$GITHUB_WORKSPACE/gcc-14.2.0-nolibc/aarch64-linux/bin/aarch64-linux- CC=$GITHUB_WORKSPACE/gcc-14.2.0-nolibc/aarch64-linux/bin/aarch64-linux-gcc -j$(nproc --all) zuma_defconfig
+          make CROSS_COMPILE=$GITHUB_WORKSPACE/gcc-14.2.0-nolibc/aarch64-linux/bin/aarch64-linux- CC=$GITHUB_WORKSPACE/gcc-14.2.0-nolibc/aarch64-linux/bin/aarch64-linux-gcc -j$(nproc --all)
+
+      - name: Копирование и подготовка артефактов
+        run: |
+          set -e
+          ZIP_NAME="${KERNEL_VER}-zuma-v${{ env.KSU_VERSION }}-AnyKernel3.zip"
+          BOOT_NAME="${KERNEL_VER}-zuma-v${{ env.KSU_VERSION }}-boot.img"
+          VENDOR_BOOT_NAME="${KERNEL_VER}-zuma-v${{ env.KSU_VERSION }}-vendor_kernel_boot.img"
+          
+          OUTPUT=$GITHUB_WORKSPACE/output && ARTIFACT=$GITHUB_WORKSPACE/artifacts && mkdir ${OUTPUT} && mkdir $ARTIFACT
+          echo "ARTIFACT=$ARTIFACT" >> $GITHUB_ENV
+          cp ${{ env.KERNEL_ROOT }}/out/arch/arm64/boot/Image $OUTPUT
+          cat ${{ env.KERNEL_ROOT }}/out/google-devices/zuma/dts/*.dtb > $OUTPUT/dtb
+
+          mkdir -p KPatch-Next && cd KPatch-Next
+          gh release download --repo KernelSU-Next/KPatch-Next -p 'kpimg-linux' -p 'kptools-linux' --clobber
+          gh release download v30.2 --repo topjohnwu/Magisk -p 'Magisk*.apk' --clobber
+          unzip -j Magisk*.apk lib/x86_64/libmagiskboot.so && mv libmagiskboot.so magiskboot
+          chmod +x kptools-linux && chmod +x magiskboot
+          export PATH="$(pwd):$PATH" && KPATCH=$(pwd) && cd -
+          kptools-linux -p -i ${OUTPUT}/Image -k ${KPATCH}/kpimg-linux -o $OUTPUT/new-Image && mv -f $OUTPUT/new-Image $OUTPUT/Image
+
+          cp $OUTPUT/* AnyKernel3
+          cd ./AnyKernel3 && zip -r "$ARTIFACT/$ZIP_NAME" ./* && cd -
+
+          BOOTIMG=$GITHUB_WORKSPACE/prebuilds/boot.img && VENDOR=$GITHUB_WORKSPACE/prebuilds/vendor_kernel_boot.img
+          TMP_DIR=$GITHUB_WORKSPACE/tmp_dir && mkdir "${TMP_DIR}"
+          unzip $GITHUB_WORKSPACE/prebuilds/stock_img_shusky.zip -d $GITHUB_WORKSPACE/prebuilds/
+          cd "${TMP_DIR}"
+          magiskboot unpack "$BOOTIMG"
+          cp $OUTPUT/Image kernel
+          magiskboot repack "$BOOTIMG" $ARTIFACT/$BOOT_NAME && rm -rf $TMP_DIR/*
+          magiskboot unpack "$VENDOR"
+          cp $OUTPUT/dtb dtb
+          magiskboot repack "$VENDOR" $ARTIFACT/$VENDOR_BOOT_NAME && rm -rf $TMP_DIR/*
+          
+      - name: Upload Artifact
+        uses: actions/upload-artifact@v6
+        with:
+          name: AnyKernel3.zip_${{ env.KERNEL_VER }}_KSU-Next${{ env.KSU_VERSION }}_zuma(Pixel8-8Pro)
+          path: |
+            ${{ env.ARTIFACT }}/*.zip
+
+      - name: Upload Artifact
+        uses: actions/upload-artifact@v6
+        with:
+          name: Flashable.img_${{ env.KERNEL_VER }}_KSU-Next${{ env.KSU_VERSION }}_zuma(Pixel8-8Pro)
+          path: |
+            ${{ env.ARTIFACT }}/*.img

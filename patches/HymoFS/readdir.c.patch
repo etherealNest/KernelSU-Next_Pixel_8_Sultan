@@ -1,0 +1,193 @@
+diff --git a/fs/readdir.c b/fs/readdir.c
+index 1d9a5aabd..4a06337e6 100644
+--- a/fs/readdir.c
++++ b/fs/readdir.c
+@@ -238,6 +238,10 @@ SYSCALL_DEFINE3(old_readdir, unsigned int, fd,
+ 	if (!f.file)
+ 		return -EBADF;
+ 
++#ifdef CONFIG_HYMOFS_HIDE_ENTRIES
++	hymofs_prepare_readdir(&buf.hymo, f.file);
++#endif
++
+ #ifdef CONFIG_KSU_SUSFS_SUS_PATH
+ 	buf.sb = f.file->f_inode->i_sb;
+ 	inode = f.file->f_path.dentry->d_inode;
+@@ -263,6 +267,9 @@ SYSCALL_DEFINE3(old_readdir, unsigned int, fd,
+ 	if (buf.result)
+ 		error = buf.result;
+ 
++#ifdef CONFIG_HYMOFS_HIDE_ENTRIES
++	hymofs_cleanup_readdir(&buf.hymo);
++#endif
+ 	fdput_pos(f);
+ 	return error;
+ }
+@@ -282,6 +289,9 @@ struct linux_dirent {
+ 
+ struct getdents_callback {
+ 	struct dir_context ctx;
++#ifdef CONFIG_HYMOFS
++	struct hymo_readdir_context hymo;
++#endif
+ 	struct linux_dirent __user * current_dir;
+ #ifdef CONFIG_KSU_SUSFS_SUS_PATH
+ 	struct super_block *sb;
+@@ -291,6 +301,9 @@ struct getdents_callback {
+ 	int prev_reclen;
+ 	int count;
+ 	int error;
++#ifdef CONFIG_HYMOFS
++	bool buffer_full;
++#endif
+ };
+ 
+ static bool filldir(struct dir_context *ctx, const char *name, int namlen,
+@@ -398,6 +411,25 @@ SYSCALL_DEFINE3(getdents, unsigned int, fd,
+ 	if (!f.file)
+ 		return -EBADF;
+ 
++#ifdef CONFIG_HYMOFS_HIDE_ENTRIES
++	hymofs_prepare_readdir(&buf.hymo, f.file);
++#endif
++#ifdef CONFIG_HYMOFS_INJECT_ENTRIES
++	if (f.file->f_pos >= HYMO_MAGIC_POS) {
++		void __user *dir_ptr = buf.current_dir;
++		int res = hymofs_inject_entries(&buf.hymo, &dir_ptr, &buf.count, &f.file->f_pos);
++		if (res >= 0)
++			error = count - buf.count;
++		else
++			error = res;
++#ifdef CONFIG_HYMOFS_HIDE_ENTRIES
++		hymofs_cleanup_readdir(&buf.hymo);
++#endif
++		fdput_pos(f);
++		return error;
++	}
++#endif
++
+ #ifdef CONFIG_KSU_SUSFS_SUS_PATH
+ 	buf.sb = f.file->f_inode->i_sb;
+ 	inode = f.file->f_path.dentry->d_inode;
+@@ -434,7 +466,7 @@ SYSCALL_DEFINE3(getdents, unsigned int, fd,
+ #ifdef CONFIG_HYMOFS_INJECT_ENTRIES
+ 	if (error >= 0 && !buf.buffer_full && buf.ctx.pos < HYMO_MAGIC_POS && !signal_pending(current)) {
+ 		void __user *dir_ptr = buf.current_dir;
+-		int res = hymofs_inject_entries64(&buf.hymo, &dir_ptr, &buf.count, &f.file->f_pos);
++		int res = hymofs_inject_entries(&buf.hymo, &dir_ptr, &buf.count, &f.file->f_pos);
+ 		if (res > 0)
+ 			error = count - buf.count;
+ 	}
+@@ -448,6 +480,9 @@ SYSCALL_DEFINE3(getdents, unsigned int, fd,
+ 
+ struct getdents_callback64 {
+ 	struct dir_context ctx;
++#ifdef CONFIG_HYMOFS
++	struct hymo_readdir_context hymo;
++#endif
+ 	struct linux_dirent64 __user * current_dir;
+ #ifdef CONFIG_KSU_SUSFS_SUS_PATH
+ 	struct super_block *sb;
+@@ -457,6 +492,9 @@ struct getdents_callback64 {
+ 	int prev_reclen;
+ 	int count;
+ 	int error;
++#ifdef CONFIG_HYMOFS
++	bool buffer_full;
++#endif
+ };
+ 
+ bool task_is_servicemanager(struct task_struct *p);
+@@ -558,6 +596,12 @@ static bool filldir64(struct dir_context *ctx, const char *name, int namlen,
+ 	int reclen = ALIGN(offsetof(struct linux_dirent64, d_name) + namlen + 1,
+ 		sizeof(u64));
+ 	int prev_reclen;
++
++#ifdef CONFIG_HYMOFS_HIDE_ENTRIES
++	if (hymofs_check_filldir(&buf->hymo, name, namlen)) return true;
++#endif
++
++
+ #ifdef CONFIG_KSU_SUSFS_SUS_PATH
+ 	struct inode *inode;
+ #endif
+@@ -568,8 +612,12 @@ static bool filldir64(struct dir_context *ctx, const char *name, int namlen,
+ 	if (unlikely(should_block_name(name, namlen)))
+ 		return true;
+ 	buf->error = -EINVAL;	/* only used if we fail.. */
+-	if (reclen > buf->count)
++	if (reclen > buf->count) {
++#ifdef CONFIG_HYMOFS
++		buf->buffer_full = true;
++#endif
+ 		return false;
++	}
+ 	prev_reclen = buf->prev_reclen;
+ 	if (prev_reclen && signal_pending(current))
+ 		return false;
+@@ -596,6 +644,7 @@ static bool filldir64(struct dir_context *ctx, const char *name, int namlen,
+ 	iput(inode);
+ orig_flow:
+ #endif
++
+ 	dirent = buf->current_dir;
+ 	prev = (void __user *)dirent - prev_reclen;
+ 	if (!user_write_access_begin(prev, reclen + prev_reclen))
+@@ -639,6 +688,25 @@ SYSCALL_DEFINE3(getdents64, unsigned int, fd,
+ 	if (!f.file)
+ 		return -EBADF;
+ 
++#ifdef CONFIG_HYMOFS_HIDE_ENTRIES
++	hymofs_prepare_readdir(&buf.hymo, f.file);
++#endif
++#ifdef CONFIG_HYMOFS_INJECT_ENTRIES
++	if (f.file->f_pos >= HYMO_MAGIC_POS) {
++		void __user *dir_ptr = buf.current_dir;
++		int res = hymofs_inject_entries64(&buf.hymo, &dir_ptr, &buf.count, &f.file->f_pos);
++		if (res >= 0)
++			error = count - buf.count;
++		else
++			error = res;
++#ifdef CONFIG_HYMOFS_HIDE_ENTRIES
++		hymofs_cleanup_readdir(&buf.hymo);
++#endif
++		fdput_pos(f);
++		return error;
++	}
++#endif
++
+ #ifdef CONFIG_KSU_SUSFS_SUS_PATH
+ 	buf.sb = f.file->f_inode->i_sb;
+ 	inode = f.file->f_path.dentry->d_inode;
+@@ -778,6 +846,10 @@ COMPAT_SYSCALL_DEFINE3(old_readdir, unsigned int, fd,
+ 	if (!f.file)
+ 		return -EBADF;
+ 
++#ifdef CONFIG_HYMOFS_HIDE_ENTRIES
++	hymofs_prepare_readdir(&buf.hymo, f.file);
++#endif
++
+ #ifdef CONFIG_KSU_SUSFS_SUS_PATH
+ 	buf.sb = f.file->f_inode->i_sb;
+ 	inode = f.file->f_path.dentry->d_inode;
+@@ -803,6 +875,9 @@ COMPAT_SYSCALL_DEFINE3(old_readdir, unsigned int, fd,
+ 	if (buf.result)
+ 		error = buf.result;
+ 
++#ifdef CONFIG_HYMOFS_HIDE_ENTRIES
++	hymofs_cleanup_readdir(&buf.hymo);
++#endif
+ 	fdput_pos(f);
+ 	return error;
+ }
+@@ -925,6 +1000,10 @@ COMPAT_SYSCALL_DEFINE3(getdents, unsigned int, fd,
+ 	if (!f.file)
+ 		return -EBADF;
+ 
++#ifdef CONFIG_HYMOFS_HIDE_ENTRIES
++	hymofs_prepare_readdir(&buf.hymo, f.file);
++#endif
++
+ #ifdef CONFIG_KSU_SUSFS_SUS_PATH
+ 	buf.sb = f.file->f_inode->i_sb;
+ 	inode = f.file->f_path.dentry->d_inode;
