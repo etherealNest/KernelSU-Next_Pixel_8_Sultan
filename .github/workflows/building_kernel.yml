@@ -20,6 +20,7 @@ jobs:
       KERNEL_VER: ''
       ARTIFACT: ''
       PATH_TO_PATCH: ''
+      KSU_NEXT_COMMIT: ''
     steps:
       - name: Checkout Repository
         uses: actions/checkout@v6
@@ -30,13 +31,16 @@ jobs:
           gunzip x86_64-gcc-14.2.0-nolibc-aarch64-linux.tar.gz
           tar -xf x86_64-gcc-14.2.0-nolibc-aarch64-linux.tar
 
+          echo "KSU_NEXT_COMMIT=6aa18400f7277ed3d0d0f30ea97f1b437a235cd3" >> $GITHUB_ENV
+          SUSFS_COMMIT=700af50a692ec8a7279bce005ffce0f91195eab1
+          echo "SUSFS_COMMIT=$SUSFS_COMMIT" >> $GITHUB_ENV
           KERNEL_ROOT=$GITHUB_WORKSPACE/android_kernel_google_tensynos
           DEFCONFIG_PATH=$GITHUB_WORKSPACE/android_kernel_google_tensynos/arch/arm64/configs/zuma_defconfig
           echo "KERNEL_ROOT=$KERNEL_ROOT" >> $GITHUB_ENV
           echo "DEFCONFIG_PATH=$DEFCONFIG_PATH" >> $GITHUB_ENV
 
           git clone https://github.com/TheWildJames/AnyKernel3.git -b "sultan-zuma"
-          git clone https://gitlab.com/simonpunk/susfs4ksu.git -b "gki-android14-6.1"
+          git clone https://gitlab.com/simonpunk/susfs4ksu.git -b "gki-android14-6.1" && cd susfs4ksu && git checkout $SUSFS_COMMIT && cd -
           git clone https://github.com/TheWildJames/kernel_patches.git
           git clone https://github.com/kerneltoast/android_kernel_google_tensynos --depth=1
 
@@ -63,7 +67,8 @@ jobs:
         working-directory: ${{ env.KERNEL_ROOT }}
         run: |
           curl -LSs "https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/next/kernel/setup.sh" | bash -s dev
-          cd "KernelSU-Next/kernel"
+          cd "KernelSU-Next"
+          git checkout ${{ env.KSU_NEXT_COMMIT }}
           BASE_VERSION=30000 && COMMIT_COUNT=$(/usr/bin/git rev-list --count origin/dev) && KSU_VERSION=$(expr $COMMIT_COUNT "+" $BASE_VERSION)
           echo "KSU_VERSION=$KSU_VERSION" >> $GITHUB_ENV
 
