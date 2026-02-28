@@ -1,0 +1,12 @@
+build_kernel.sh
+android_kernel_google_tensynos/
+gcc-14.2.0-nolibc/
+output/
+artifacts/
+KPatch-Next/
+tmp_dir/
+susfs4ksu/
+kernel_patches/
+AnyKernel3/
+*.tar.gz
+*.tar
